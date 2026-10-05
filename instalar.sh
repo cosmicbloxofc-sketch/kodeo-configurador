@@ -176,12 +176,12 @@ tela_chave_do_comando() {
 }
 
 # ── ferramentas: Claude Code, Claude App, OpenCode (detecção REAL, só leitura) ─
-NOMES=("Claude Code" "Claude App" "OpenCode")
-IDS=("claude-code" "claude-app" "opencode")
-ONDE=("~/.claude/settings.json + ~/.zshrc" "Claude-3p/claude_desktop_config.json" "~/.config/opencode/opencode.json")
-CONF=(0 0 0)   # 1 = já configurado pra Kodeo
-SEL=(0 0 0)    # 1 = marcado (configurar ou desconfigurar, conforme o estado)
-INST=(0 0 0)   # 1 = ferramenta encontrada no computador
+NOMES=("Claude Code" "Claude App" "OpenCode" "Codex")
+IDS=("claude-code" "claude-app" "opencode" "codex")
+ONDE=("~/.claude/settings.json + ~/.zshrc" "Claude-3p/claude_desktop_config.json" "~/.config/opencode/opencode.json" "~/.codex/config.toml")
+CONF=(0 0 0 0)   # 1 = já configurado pra Kodeo
+SEL=(0 0 0 0)    # 1 = marcado (configurar ou desconfigurar, conforme o estado)
+INST=(0 0 0 0)   # 1 = ferramenta encontrada no computador
 detectar() {
   # Claude Code: env no settings.json OU bloco Kodeo no ~/.zshrc (mesmo formato do app de computador)
   if grep -qs "api.kodeo.com.br" "$HOME/.claude/settings.json" 2>/dev/null || grep -qs "^# >>> kodeo >>>" "$HOME/.zshrc" "$HOME/.bashrc" 2>/dev/null; then CONF[0]=1; fi
@@ -194,7 +194,10 @@ detectar() {
   # OpenCode: provider "kodeo" no opencode.json
   grep -qs '"kodeo"' "$HOME/.config/opencode/opencode.json" 2>/dev/null && CONF[2]=1
   command -v opencode >/dev/null 2>&1 && INST[2]=1
-  local i; for i in 0 1 2; do [ "${CONF[$i]}" -eq 0 ] && SEL[$i]=1; done   # o que falta vem marcado
+  # Codex: provider kodeo no config.toml (CODEX_HOME ou ~/.codex)
+  grep -qs "model_providers.kodeo" "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null && CONF[3]=1
+  command -v codex >/dev/null 2>&1 && INST[3]=1
+  local i; for i in 0 1 2 3; do [ "${CONF[$i]}" -eq 0 ] && SEL[$i]=1; done   # o que falta vem marcado
 }
 tela_ferramentas() { # devolve 0 = aplicar, 1 = voltar
   tela "2/3  Ferramentas"
@@ -302,9 +305,14 @@ rc_remover_bloco() { # tira o bloco entre as marcas (se existir)
   local f="$1"; [ -f "$f" ] || return 0
   awk -v a="$MARCA_INI" -v b="$MARCA_FIM" '$0==a{dentro=1;next} $0==b{dentro=0;next} !dentro' "$f" >"$f.kodeo-tmp" && mv "$f.kodeo-tmp" "$f"
 }
-rc_escrever_bloco() {
+rc_escrever_bloco() { # Claude Code (ANTHROPIC_*) e Codex (KODEO_API_KEY, lido pelo env_key do config.toml)
   local f="$1"; rc_remover_bloco "$f"
-  printf '%s\nexport ANTHROPIC_BASE_URL="%s"\nexport ANTHROPIC_AUTH_TOKEN="%s"\n%s\n' "$MARCA_INI" "$BASE" "$CHAVE" "$MARCA_FIM" >>"$f"
+  printf '%s\nexport ANTHROPIC_BASE_URL="%s"\nexport ANTHROPIC_AUTH_TOKEN="%s"\nexport KODEO_API_KEY="%s"\n%s\n' "$MARCA_INI" "$BASE" "$CHAVE" "$CHAVE" "$MARCA_FIM" >>"$f"
+}
+rc_escrever_bloco_codex() { # só a chave (quando o Claude Code não foi marcado e o bloco ainda não existe)
+  local f="$1"; grep -qs "^$MARCA_INI" "$f" 2>/dev/null && grep -qs "KODEO_API_KEY" "$f" && return 0
+  rc_remover_bloco "$f"
+  printf '%s\nexport KODEO_API_KEY="%s"\n%s\n' "$MARCA_INI" "$CHAVE" "$MARCA_FIM" >>"$f"
 }
 teste_conexao() { local st; st=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$BASE/v1/models" -H "x-api-key: $CHAVE"); [ "$st" = 200 ] || { echo "api respondeu $st"; return 1; }; }
 
@@ -317,9 +325,14 @@ aplicar_claude_code() {
 }
 remover_claude_code() {
   if [ -n "$JSON_TOOL" ] && [ -f "$HOME/.claude/settings.json" ]; then passo "Tirar o env da Kodeo do ~/.claude/settings.json" json_edit "$HOME/.claude/settings.json" claude-code-del; fi
-  local f; for f in "$HOME/.zshrc" "$HOME/.bashrc"; do [ -f "$f" ] && grep -qs "^$MARCA_INI" "$f" && passo "Remover o bloco Kodeo de ${f/#$HOME/~}" rc_remover_bloco "$f"; done
+  local f; for f in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [ -f "$f" ] && grep -qs "^$MARCA_INI" "$f" || continue
+    if [ "${CONF[3]}" -eq 1 ] && [ "${SEL[3]}" -eq 0 ]; then passo "Deixar só a KODEO_API_KEY (Codex continua) em ${f/#$HOME/~}" rc_escrever_bloco_so_chave "$f"
+    else passo "Remover o bloco Kodeo de ${f/#$HOME/~}" rc_remover_bloco "$f"; fi
+  done
   true
 }
+rc_escrever_bloco_so_chave() { local f="$1"; rc_remover_bloco "$f"; printf '%s\nexport KODEO_API_KEY="%s"\n%s\n' "$MARCA_INI" "$CHAVE" "$MARCA_FIM" >>"$f"; }
 
 # Claude App: Claude-3p/configLibrary + deploymentMode 3p + reinício (igual ao app de computador)
 pasta_3p() {
@@ -381,6 +394,48 @@ remover_opencode() {
   if [ -n "$JSON_TOOL" ] && [ -f "$OC_CFG" ]; then passo "Remover o provedor kodeo do opencode.json (e devolver o modelo anterior)" oc_remover; else rm -f "$OC_KEY" "$OC_BK"; fi
   true
 }
+# Codex: provider kodeo em config.toml (CODEX_HOME ou ~/.codex), wire_api responses, chave via env KODEO_API_KEY
+CX_DIR="${CODEX_HOME:-$HOME/.codex}"; CX_CFG="$CX_DIR/config.toml"; CX_BK="$HOME/.config/kodeo/codex-config.toml.anterior"
+CX_MODELO="claude-opus-5"
+cx_bloco_topo() { printf '# >>> kodeo >>>\nmodel = "%s"\nmodel_provider = "kodeo"\n# <<< kodeo <<<\n' "$CX_MODELO"; }
+cx_bloco_provider() { printf '# >>> kodeo provider >>>\n[model_providers.kodeo]\nname = "Kodeo"\nbase_url = "%s/v1"\nwire_api = "responses"\nenv_key = "KODEO_API_KEY"\n# <<< kodeo provider <<<\n' "$BASE"; }
+cx_sem_blocos() { # tira os blocos marcados (se houver)
+  awk '/^# >>> kodeo( provider)? >>>$/{dentro=1;next} /^# <<< kodeo( provider)? <<<$/{dentro=0;next} !dentro' "$1"
+}
+cx_escrever() {
+  mkdir -p "$CX_DIR" || return 1
+  if [ ! -f "$CX_CFG" ]; then { cx_bloco_topo; printf '\n'; cx_bloco_provider; } >"$CX_CFG"; return; fi
+  # guarda o original uma vez (pra devolver no desconfigurar)
+  if [ ! -f "$CX_BK" ]; then mkdir -p "$(dirname "$CX_BK")" && cp "$CX_CFG" "$CX_BK"; fi
+  local resto; resto=$(cx_sem_blocos "$CX_CFG")
+  # TOML: chaves de topo (model, model_provider) só valem ANTES da primeira [tabela] -> o nosso topo vai primeiro,
+  # e tiramos um model/model_provider de topo que o usuário já tivesse (ficam guardados no backup)
+  local cabeca cauda
+  cabeca=$(printf '%s\n' "$resto" | awk '/^\[/{exit} {print}' | grep -vE '^\s*(model|model_provider)\s*=')
+  cauda=$(printf '%s\n' "$resto" | awk 'f{print} /^\[/{if(!f){f=1;print}}')
+  { cx_bloco_topo; [ -n "$cabeca" ] && printf '%s\n' "$cabeca"; [ -n "$cauda" ] && printf '%s\n' "$cauda"; printf '\n'; cx_bloco_provider; } >"$CX_CFG.kodeo-tmp" && mv "$CX_CFG.kodeo-tmp" "$CX_CFG"
+}
+cx_remover() {
+  [ -f "$CX_CFG" ] || return 0
+  if [ -f "$CX_BK" ]; then mv "$CX_BK" "$CX_CFG"; return 0; fi      # tinha config antes: volta ela
+  if ! grep -qs "^# >>> kodeo" "$CX_CFG"; then return 0; fi
+  local resto; resto=$(cx_sem_blocos "$CX_CFG")
+  if [ -z "$(printf '%s' "$resto" | tr -d '[:space:]')" ]; then rm -f "$CX_CFG"; else printf '%s\n' "$resto" >"$CX_CFG"; fi
+}
+cx_teste() { local st; st=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -A "kodeo-configurador/$VERSAO" "$BASE/v1/responses" -H "Authorization: Bearer $CHAVE" -H "content-type: application/json" -d "{\"model\":\"$CX_MODELO\",\"input\":\"Responda só: ok\",\"max_output_tokens\":20,\"store\":false}"); [ "$st" = 200 ] || { echo "api respondeu $st"; return 1; }; }
+aplicar_codex() {
+  passo "Provedor kodeo em ${CX_CFG/#$HOME/~} (wire_api responses, modelo $CX_MODELO)" cx_escrever
+  local f; for f in $(RC_FILES); do passo "KODEO_API_KEY em ${f/#$HOME/~} (o Codex lê a chave do ambiente)" rc_escrever_bloco_codex "$f"; done
+  passo "Teste de conexão (api.kodeo.com.br/v1/responses)" cx_teste
+}
+remover_codex() {
+  passo "Devolver o ${CX_CFG/#$HOME/~} como estava (ou remover o provedor kodeo)" cx_remover
+  # a chave no rc sai junto com o bloco do Claude Code, se ele também for desconfigurado; sozinho, tira só se o bloco for só a chave
+  local f; for f in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [ -f "$f" ] && grep -qs "^$MARCA_INI" "$f" && ! grep -qs "ANTHROPIC_BASE_URL" "$f" && passo "Remover KODEO_API_KEY de ${f/#$HOME/~}" rc_remover_bloco "$f"
+  done
+  true
+}
 FEITAS=(); REMOVIDAS=()
 tela_configurar() {
   tela "3/3  Configurar"
@@ -390,11 +445,11 @@ tela_configurar() {
     [ "${SEL[$i]}" -eq 1 ] || continue
     if [ "${CONF[$i]}" -eq 1 ]; then
       printf '  %s%s%s  %sdesconfigurar%s\n' "$B$W" "${NOMES[$i]}" "$R" "$G" "$R"
-      case "${IDS[$i]}" in claude-code) remover_claude_code;; claude-app) remover_claude_app;; opencode) remover_opencode;; esac
+      case "${IDS[$i]}" in claude-code) remover_claude_code;; claude-app) remover_claude_app;; opencode) remover_opencode;; codex) remover_codex;; esac
       REMOVIDAS+=("${NOMES[$i]}")
     else
       printf '  %s%s%s  %sconfigurar%s\n' "$B$W" "${NOMES[$i]}" "$R" "$G" "$R"
-      case "${IDS[$i]}" in claude-code) aplicar_claude_code;; claude-app) aplicar_claude_app;; opencode) aplicar_opencode;; esac
+      case "${IDS[$i]}" in claude-code) aplicar_claude_code;; claude-app) aplicar_claude_app;; opencode) aplicar_opencode;; codex) aplicar_codex;; esac
       FEITAS+=("${NOMES[$i]}")
     fi
     printf '\n'

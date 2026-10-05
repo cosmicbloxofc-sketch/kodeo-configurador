@@ -190,11 +190,11 @@ function TelaChaveDoComando {
 }
 
 # ── ferramentas: Claude Code, Claude App, OpenCode (detecção REAL, só leitura) ─
-$NOMES = 'Claude Code', 'Claude App', 'OpenCode'
-$IDS   = 'claude-code', 'claude-app', 'opencode'
-$script:CONF = @($false, $false, $false)
-$script:SEL  = @($false, $false, $false)
-$script:INST = @($false, $false, $false)
+$NOMES = 'Claude Code', 'Claude App', 'OpenCode', 'Codex'
+$IDS   = 'claude-code', 'claude-app', 'opencode', 'codex'
+$script:CONF = @($false, $false, $false, $false)
+$script:SEL  = @($false, $false, $false, $false)
+$script:INST = @($false, $false, $false, $false)
 function TemTexto($arq, $padrao) { try { (Test-Path $arq) -and ((Get-Content -Raw $arq -ErrorAction Stop) -match $padrao) } catch { $false } }
 function Detectar {
   $home_ = $env:USERPROFILE; if (-not $home_) { $home_ = $HOME }
@@ -211,7 +211,10 @@ function Detectar {
   # OpenCode: provider "kodeo" no opencode.json
   $script:CONF[2] = TemTexto (Join-Path $home_ '.config\opencode\opencode.json') '"kodeo"'
   $script:INST[2] = [bool](Get-Command opencode -ErrorAction SilentlyContinue)
-  for ($i = 0; $i -lt 3; $i++) { $script:SEL[$i] = -not $script:CONF[$i] }   # o que falta vem marcado
+  # Codex: provider kodeo no config.toml (CODEX_HOME ou ~\.codex)
+  $script:CONF[3] = TemTexto (CxCfg) 'model_providers\.kodeo'
+  $script:INST[3] = [bool](Get-Command codex -ErrorAction SilentlyContinue)
+  for ($i = 0; $i -lt 4; $i++) { $script:SEL[$i] = -not $script:CONF[$i] }   # o que falta vem marcado
 }
 function TelaFerramentas { # $true = aplicar, $false = voltar
   Tela '2/3  Ferramentas'
@@ -285,12 +288,12 @@ function AplicarClaudeCode {
     foreach ($k in $ENV_KODEO.Keys) { $v = if ($k -eq 'ANTHROPIC_AUTH_TOKEN') { $script:CHAVE } else { $ENV_KODEO[$k] }; Definir $env_ $k $v }
     Definir $j 'env' $env_; GravarJson $CC_CFG $j
   }
-  if ($WIN) { Passo 'Variáveis de ambiente do usuário (ANTHROPIC_BASE_URL + chave)' { [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $BASE, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $script:CHAVE, 'User') } }
+  if ($WIN) { Passo 'Variáveis de ambiente do usuário (ANTHROPIC_BASE_URL + chave + KODEO_API_KEY)' { [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $BASE, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $script:CHAVE, 'User'); [Environment]::SetEnvironmentVariable('KODEO_API_KEY', $script:CHAVE, 'User') } }
   Passo 'Teste de conexão (api.kodeo.com.br/v1/models)' { $r = Invoke-WebRequest -Uri "$BASE/v1/models" -Headers @{ 'x-api-key' = $script:CHAVE } -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop; if ([int]$r.StatusCode -ne 200) { throw "api respondeu $($r.StatusCode)" } }
 }
 function RemoverClaudeCode {
   if (Test-Path $CC_CFG) { Passo 'Tirar o env da Kodeo do ~\.claude\settings.json' { $j = LerJson $CC_CFG; if ($j.PSObject.Properties['env'] -and $j.env -is [pscustomobject]) { foreach ($k in $ENV_KODEO.Keys) { Tirar $j.env $k }; if (-not $j.env.PSObject.Properties.Count) { Tirar $j 'env' } }; GravarJson $CC_CFG $j } }
-  if ($WIN) { Passo 'Limpar as variáveis de ambiente do usuário' { [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $null, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User') } }
+  if ($WIN) { Passo 'Limpar as variáveis de ambiente do usuário' { [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $null, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User'); if (-not ($script:CONF[3] -and -not $script:SEL[3])) { [Environment]::SetEnvironmentVariable('KODEO_API_KEY', $null, 'User') } } }
 }
 
 # Claude App: Claude-3p\configLibrary + deploymentMode 3p + reinício (igual ao app de computador)
@@ -355,6 +358,49 @@ function RemoverOpenCode {
     }
   } else { Remove-Item -Force -ErrorAction SilentlyContinue $OC_KEY, $OC_BK }
 }
+# Codex: provider kodeo em config.toml (CODEX_HOME ou ~\.codex), wire_api responses, chave pela variável KODEO_API_KEY
+$CX_MODELO = 'claude-opus-5'
+function CxDir { if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path (Casa) '.codex' } }
+function CxCfg { Join-Path (CxDir) 'config.toml' }
+$CX_BK = Join-Path (Casa) '.config\kodeo\codex-config.toml.anterior'
+function CxBlocoTopo { "# >>> kodeo >>>`nmodel = `"$CX_MODELO`"`nmodel_provider = `"kodeo`"`n# <<< kodeo <<<`n" }
+function CxBlocoProvider { "# >>> kodeo provider >>>`n[model_providers.kodeo]`nname = `"Kodeo`"`nbase_url = `"$BASE/v1`"`nwire_api = `"responses`"`nenv_key = `"KODEO_API_KEY`"`n# <<< kodeo provider <<<`n" }
+function CxSemBlocos($txt) {
+  $out = @(); $dentro = $false
+  foreach ($l in ($txt -split "`r?`n")) {
+    if ($l -match '^# >>> kodeo( provider)? >>>$') { $dentro = $true; continue }
+    if ($l -match '^# <<< kodeo( provider)? <<<$') { $dentro = $false; continue }
+    if (-not $dentro) { $out += $l }
+  }
+  ($out -join "`n")
+}
+function CxEscrever {
+  $cfg = CxCfg; $dir = CxDir; New-Item -ItemType Directory -Force $dir | Out-Null
+  if (-not (Test-Path $cfg)) { [IO.File]::WriteAllText($cfg, (CxBlocoTopo) + "`n" + (CxBlocoProvider), [Text.UTF8Encoding]::new($false)); return }
+  if (-not (Test-Path $CX_BK)) { New-Item -ItemType Directory -Force (Split-Path $CX_BK) | Out-Null; Copy-Item $cfg $CX_BK }
+  $resto = CxSemBlocos (Get-Content -Raw -Encoding UTF8 $cfg)
+  # chaves de topo só valem antes da primeira [tabela]: nosso topo vai primeiro; model/model_provider antigos saem (ficam no backup)
+  $linhas = $resto -split "`n"; $cabeca = @(); $cauda = @(); $viuTabela = $false
+  foreach ($l in $linhas) { if (-not $viuTabela -and $l -match '^\[') { $viuTabela = $true }; if ($viuTabela) { $cauda += $l } elseif ($l -notmatch '^\s*(model|model_provider)\s*=') { $cabeca += $l } }
+  $novo = (CxBlocoTopo) + (($cabeca -join "`n").TrimEnd()) + "`n" + (($cauda -join "`n").TrimEnd()) + "`n`n" + (CxBlocoProvider)
+  $tmp = "$cfg.kodeo-tmp"; [IO.File]::WriteAllText($tmp, $novo, [Text.UTF8Encoding]::new($false)); Move-Item -Force $tmp $cfg
+}
+function CxRemover {
+  $cfg = CxCfg; if (-not (Test-Path $cfg)) { return }
+  if (Test-Path $CX_BK) { Move-Item -Force $CX_BK $cfg; return }
+  $txt = Get-Content -Raw -Encoding UTF8 $cfg; if ($txt -notmatch '# >>> kodeo') { return }
+  $resto = CxSemBlocos $txt
+  if (-not $resto.Trim()) { Remove-Item -Force $cfg } else { [IO.File]::WriteAllText($cfg, $resto.TrimEnd() + "`n", [Text.UTF8Encoding]::new($false)) }
+}
+function AplicarCodex {
+  Passo "Provedor kodeo em ~\.codex\config.toml (wire_api responses, modelo $CX_MODELO)" { CxEscrever }
+  if ($WIN) { Passo 'KODEO_API_KEY nas variáveis do usuário (o Codex lê a chave do ambiente)' { [Environment]::SetEnvironmentVariable('KODEO_API_KEY', $script:CHAVE, 'User') } }
+  Passo 'Teste de conexão (api.kodeo.com.br/v1/responses)' { $r = Invoke-WebRequest -Uri "$BASE/v1/responses" -Method Post -Headers @{ 'Authorization' = "Bearer $($script:CHAVE)" } -ContentType 'application/json' -Body (@{ model = $CX_MODELO; input = 'Responda só: ok'; max_output_tokens = 20; store = $false } | ConvertTo-Json) -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop; if ([int]$r.StatusCode -ne 200) { throw "api respondeu $($r.StatusCode)" } }
+}
+function RemoverCodex {
+  Passo 'Devolver o ~\.codex\config.toml como estava (ou remover o provedor kodeo)' { CxRemover }
+  if ($WIN -and -not ($script:CONF[0] -and -not $script:SEL[0])) { Passo 'Limpar KODEO_API_KEY das variáveis do usuário' { [Environment]::SetEnvironmentVariable('KODEO_API_KEY', $null, 'User') } }
+}
 function Mascara { $c = $script:CHAVE; $c.Substring(0, [Math]::Min(9, $c.Length)) + '…' + $c.Substring([Math]::Max(0, $c.Length - 4)) }
 function TelaConfigurar {
   Tela '3/3  Configurar'
@@ -364,11 +410,11 @@ function TelaConfigurar {
     if (-not $script:SEL[$i]) { continue }
     if ($script:CONF[$i]) {
       Linha "  $B$W$($NOMES[$i])$R  $($G)desconfigurar$R"
-      switch ($IDS[$i]) { 'claude-code' { RemoverClaudeCode } 'claude-app' { RemoverClaudeApp } 'opencode' { RemoverOpenCode } }
+      switch ($IDS[$i]) { 'claude-code' { RemoverClaudeCode } 'claude-app' { RemoverClaudeApp } 'opencode' { RemoverOpenCode } 'codex' { RemoverCodex } }
       $removidas += $NOMES[$i]
     } else {
       Linha "  $B$W$($NOMES[$i])$R  $($G)configurar$R"
-      switch ($IDS[$i]) { 'claude-code' { AplicarClaudeCode } 'claude-app' { AplicarClaudeApp } 'opencode' { AplicarOpenCode } }
+      switch ($IDS[$i]) { 'claude-code' { AplicarClaudeCode } 'claude-app' { AplicarClaudeApp } 'opencode' { AplicarOpenCode } 'codex' { AplicarCodex } }
       $feitas += $NOMES[$i]
     }
     Linha ""
