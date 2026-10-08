@@ -8,8 +8,13 @@
 # v1.0 (05/10/2026): DE VERDADE. Valida a chave na API antes de gravar, configura
 # e desconfigura Claude Code, Claude App e OpenCode nos mesmos lugares que o app de
 # computador da Kodeo. KODEO_SEM_REINICIAR=1 pula o reinício do Claude App (testes).
+# v1.0.1 (08/10/2026): tudo roda num escopo filho (& { }): Set-StrictMode e
+# $ErrorActionPreference ficam só aqui dentro (perfil com Set-StrictMode quebrava o
+# .Count) e sair não fecha mais a janela do PowerShell (exit dentro do iex fechava).
+& {
+Set-StrictMode -Off
 $ErrorActionPreference = 'Stop'
-$VERSAO = '1.0'
+$VERSAO = '1.0.1'
 $BASE = 'https://api.kodeo.com.br'
 $WIN = ($env:OS -eq 'Windows_NT')
 
@@ -43,7 +48,8 @@ try { [Console]::TreatControlCAsInput = $true } catch {}
 function CursorOff { try { [Console]::CursorVisible = $false } catch {} }
 function CursorOn  { try { [Console]::CursorVisible = $true } catch {} }
 function Restaura { CursorOn; try { [Console]::TreatControlCAsInput = $false } catch {}; Out $R }
-function Cancela { Restaura; Linha ""; Linha ""; Linha "  $($G)Cancelado.$R Nada foi alterado."; Linha ""; exit 130 }
+function Sair { throw 'kodeo:sair' }   # o try do fim pega; exit aqui fecharia a janela de quem rodou com iex
+function Cancela { Restaura; Linha ""; Linha ""; Linha "  $($G)Cancelado.$R Nada foi alterado."; Linha ""; Sair }
 
 # teste automatizado sem terminal: KODEO_TESTE_TECLAS="ck_abc\n{DOWN} \n" (\n = Enter, {UP} {DOWN} {LEFT} {RIGHT} {BS})
 $script:TECLAS_TESTE = $null
@@ -186,7 +192,7 @@ function TelaChaveDoComando {
   LimpaLinha
   if ($st -eq 200) { Linha "  $OK✓$R Chave válida"; Pausa 600; return }
   if ($st -in 401, 403) { Linha "  $ERR✗$R A API recusou a chave do comando. Pegue o comando de novo no painel." } else { Linha "  $($G)!$R Não consegui falar com api.kodeo.com.br ($st). Verifique a internet e rode o comando de novo." }
-  Rodape 'enter:sair'; while ($true) { if ((Tecla) -eq 'enter') { break } }; exit 1
+  Rodape 'enter:sair'; while ($true) { if ((Tecla) -eq 'enter') { break } }; Sair
 }
 
 # ── ferramentas: Claude Code, Claude App, OpenCode (detecção REAL, só leitura) ─
@@ -240,7 +246,7 @@ function TelaFerramentas { # $true = aplicar, $false = voltar
       'space' { $script:SEL[$cur] = -not $script:SEL[$cur] }
       { $_ -in 'a', 'A' } { for ($i = 0; $i -lt $n; $i++) { $script:SEL[$i] = $true } }
       { $_ -in 'left', 'b', 'B' } { if (-not $script:CHAVE_DO_COMANDO) { return $false } }
-      'enter' { if (($script:SEL | Where-Object { $_ }).Count -gt 0) { return $true } }
+      'enter' { if (@($script:SEL | Where-Object { $_ }).Count -gt 0) { return $true } }
     }
     Out "$E[$($n)A"; Desenha
   }
@@ -292,7 +298,7 @@ function AplicarClaudeCode {
   Passo 'Teste de conexão (api.kodeo.com.br/v1/models)' { $r = Invoke-WebRequest -Uri "$BASE/v1/models" -Headers @{ 'x-api-key' = $script:CHAVE } -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop; if ([int]$r.StatusCode -ne 200) { throw "api respondeu $($r.StatusCode)" } }
 }
 function RemoverClaudeCode {
-  if (Test-Path $CC_CFG) { Passo 'Tirar o env da Kodeo do ~\.claude\settings.json' { $j = LerJson $CC_CFG; if ($j.PSObject.Properties['env'] -and $j.env -is [pscustomobject]) { foreach ($k in $ENV_KODEO.Keys) { Tirar $j.env $k }; if (-not $j.env.PSObject.Properties.Count) { Tirar $j 'env' } }; GravarJson $CC_CFG $j } }
+  if (Test-Path $CC_CFG) { Passo 'Tirar o env da Kodeo do ~\.claude\settings.json' { $j = LerJson $CC_CFG; if ($j.PSObject.Properties['env'] -and $j.env -is [pscustomobject]) { foreach ($k in $ENV_KODEO.Keys) { Tirar $j.env $k }; if (-not @($j.env.PSObject.Properties).Count) { Tirar $j 'env' } }; GravarJson $CC_CFG $j } }
   if ($WIN) { Passo 'Limpar as variáveis de ambiente do usuário' { [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $null, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User'); if (-not ($script:CONF[3] -and -not $script:SEL[3])) { [Environment]::SetEnvironmentVariable('KODEO_API_KEY', $null, 'User') } } }
 }
 
@@ -443,6 +449,9 @@ try {
     if (TelaFerramentas) { break }
   }
   TelaConfigurar
+} catch {
+  if ("$_" -ne 'kodeo:sair') { throw }
 } finally {
   Restaura
+}
 }
